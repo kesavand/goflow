@@ -22,17 +22,9 @@ func newRepeatGraph() (*Graph, error) {
 }
 
 func TestBasicIIP(t *testing.T) {
-	qty := 5
+	p := new(pipeline)
 
-	n, err := newRepeatGraph()
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	if err := n.AddIIP("r", "Times", qty); err != nil {
-		t.Error(err)
-		return
-	}
+	qty := 5
 
 	input := "hello"
 	output := []string{"hello", "hello", "hello", "hello", "hello"}
@@ -40,12 +32,25 @@ func TestBasicIIP(t *testing.T) {
 	in := make(chan string)
 	out := make(chan string)
 
-	if err := n.SetInPort("Word", in); err != nil {
-		t.Error(err)
-		return
-	}
-	if err := n.SetOutPort("Words", out); err != nil {
-		t.Error(err)
+	var n *Graph
+
+	p.
+		ok(func() error {
+			var err error
+			n, err = newRepeatGraph()
+			return err
+		}).
+		ok(func() error {
+			return n.AddIIP("r", "Times", qty)
+		}).
+		ok(func() error {
+			return n.SetInPort("Word", in)
+		}).
+		ok(func() error {
+			return n.SetOutPort("Words", out)
+		})
+	if p.err != nil {
+		t.Error(p.err)
 		return
 	}
 
@@ -72,20 +77,24 @@ func TestBasicIIP(t *testing.T) {
 }
 
 func newRepeatGraph2Ins() (*Graph, error) {
+	p := new(pipeline)
 	n := NewGraph()
 
-	if err := n.Add("r", new(repeater)); err != nil {
-		return nil, err
-	}
-
-	if err := n.MapInPort("Word", "r", "Word"); err != nil {
-		return nil, err
-	}
-	if err := n.MapInPort("Times", "r", "Times"); err != nil {
-		return nil, err
-	}
-	if err := n.MapOutPort("Words", "r", "Words"); err != nil {
-		return nil, err
+	p.
+		ok(func() error {
+			return n.Add("r", new(repeater))
+		}).
+		ok(func() error {
+			return n.MapInPort("Word", "r", "Word")
+		}).
+		ok(func() error {
+			return n.MapInPort("Times", "r", "Times")
+		}).
+		ok(func() error {
+			return n.MapOutPort("Words", "r", "Words")
+		})
+	if p.err != nil {
+		return nil, p.err
 	}
 
 	return n, nil
@@ -94,12 +103,6 @@ func newRepeatGraph2Ins() (*Graph, error) {
 func TestGraphInportIIP(t *testing.T) {
 	qty := 5
 
-	n, err := newRepeatGraph2Ins()
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
 	input := "hello"
 	output := []string{"hello", "hello", "hello", "hello", "hello"}
 
@@ -107,20 +110,30 @@ func TestGraphInportIIP(t *testing.T) {
 	times := make(chan int)
 	out := make(chan string)
 
-	if err := n.SetInPort("Word", in); err != nil {
-		t.Error(err)
-		return
-	}
-	if err := n.SetInPort("Times", times); err != nil {
-		t.Error(err)
-		return
-	}
-	if err := n.SetOutPort("Words", out); err != nil {
-		t.Error(err)
-		return
-	}
-	if err := n.AddIIP("r", "Times", qty); err != nil {
-		t.Error(err)
+	p := new(pipeline)
+
+	var n *Graph
+
+	p.
+		ok(func() error {
+			var err error
+			n, err = newRepeatGraph2Ins()
+			return err
+		}).
+		ok(func() error {
+			return n.SetInPort("Word", in)
+		}).
+		ok(func() error {
+			return n.SetInPort("Times", times)
+		}).
+		ok(func() error {
+			return n.SetOutPort("Words", out)
+		}).
+		ok(func() error {
+			return n.AddIIP("r", "Times", qty)
+		})
+	if p.err != nil {
+		t.Error(p.err)
 		return
 	}
 
@@ -156,26 +169,30 @@ func TestInternalConnectionIIP(t *testing.T) {
 	output := []int{1, 2}
 	qty := 2
 
-	n, err := newDoubleEcho()
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
-	if err := n.AddIIP("e2", "In", iip); err != nil {
-		t.Error(err)
-		return
-	}
-
 	in := make(chan int)
 	out := make(chan int)
 
-	if err := n.SetInPort("In", in); err != nil {
-		t.Error(err)
-		return
-	}
-	if err := n.SetOutPort("Out", out); err != nil {
-		t.Error(err)
+	p := new(pipeline)
+
+	var n *Graph
+
+	p.
+		ok(func() error {
+			var err error
+			n, err = newDoubleEcho()
+			return err
+		}).
+		ok(func() error {
+			return n.AddIIP("e2", "In", iip)
+		}).
+		ok(func() error {
+			return n.SetInPort("In", in)
+		}).
+		ok(func() error {
+			return n.SetOutPort("Out", out)
+		})
+	if p.err != nil {
+		t.Error(p.err)
 		return
 	}
 
@@ -204,30 +221,26 @@ func TestInternalConnectionIIP(t *testing.T) {
 func TestAddRemoveIIP(t *testing.T) {
 	n := NewGraph()
 
-	if err := n.Add("e", new(echo)); err != nil {
-		t.Error(err)
-		return
-	}
+	p := new(pipeline)
 
-	if err := n.AddIIP("e", "In", 5); err != nil {
-		t.Error(err)
-		return
-	}
-
-	// Adding an IIP to a non-existing process/port should fail
-	if err := n.AddIIP("d", "No", 404); err == nil {
-		t.FailNow()
-		return
-	}
-
-	if err := n.RemoveIIP("e", "In"); err != nil {
-		t.Error(err)
-		return
-	}
-
-	// Second attempt to remove same IIP should fail
-	if err := n.RemoveIIP("e", "In"); err == nil {
-		t.FailNow()
-		return
+	p.
+		ok(func() error {
+			return n.Add("e", new(echo))
+		}).
+		ok(func() error {
+			return n.AddIIP("e", "In", 5)
+		}).
+		fails(func() error {
+			return n.AddIIP("d", "No", 404)
+		}).
+		ok(func() error {
+			return n.RemoveIIP("e", "In")
+		}).
+		fails(func() error {
+			// Second attempt to remove same IIP should fail
+			return n.RemoveIIP("e", "In")
+		})
+	if p.err != nil {
+		t.Error(p.err)
 	}
 }

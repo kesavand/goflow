@@ -30,82 +30,72 @@ func TestFactoryCreate(t *testing.T) {
 }
 
 func TestFactoryRegistration(t *testing.T) {
+	p := new(pipeline)
+
 	f := NewFactory(FactoryConfig{
 		RegistryCapacity: 10,
 	})
 
-	if err := RegisterTestComponents(f); err != nil {
-		t.Error(err)
-		return
-	}
-
-	err := f.Register("echo", func() (interface{}, error) {
-		return new(echo), nil
-	})
-	if err == nil {
-		t.Errorf("Expected an error")
-		return
-	}
-
-	err = f.Annotate("notfound", Annotation{})
-	if err == nil {
-		t.Errorf("Expected an error")
-		return
-	}
-
-	err = f.Unregister("echo")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
-	err = f.Unregister("echo")
-	if err == nil {
-		t.Errorf("Expected an error")
-		return
-	}
+	p.
+		ok(func() error {
+			return RegisterTestComponents(f)
+		}).
+		ok(func() error {
+			return f.Register("echo", func() (interface{}, error) {
+				return new(echo), nil
+			})
+		}).
+		fails(func() error {
+			return f.Annotate("notfound", Annotation{})
+		}).
+		ok(func() error {
+			return f.Unregister("echo")
+		}).
+		fails(func() error {
+			return f.Unregister("echo")
+		})
 }
 
 func TestFactoryGraph(t *testing.T) {
+	p := new(pipeline)
+
 	f := NewFactory()
-	err := RegisterTestComponents(f)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	err = RegisterTestGraph(f)
-	if err != nil {
-		t.Error(err)
+
+	p.
+		ok(func() error {
+			return RegisterTestComponents(f)
+		}).
+		ok(func() error {
+			return RegisterTestGraph(f)
+		})
+	if p.err != nil {
+		t.Error(p.err)
 		return
 	}
 
 	n := NewGraph()
 
-	if err = n.AddNew("de", "doubleEcho", f); err != nil {
-		t.Error(err)
-		return
-	}
-	if err = n.AddNew("e", "echo", f); err != nil {
-		t.Error(err)
-		return
-	}
-
-	if err = n.AddNew("notfound", "notfound", f); err == nil {
-		t.Errorf("Expected an error")
-		return
-	}
-
-	if err = n.Connect("de", "Out", "e", "In"); err != nil {
-		t.Error(err)
-		return
-	}
-
-	if err = n.MapInPort("In", "de", "In"); err != nil {
-		t.Error(err)
-		return
-	}
-	if err = n.MapOutPort("Out", "e", "Out"); err != nil {
-		t.Error(err)
+	p.
+		ok(func() error {
+			return n.AddNew("de", "doubleEcho", f)
+		}).
+		ok(func() error {
+			return n.AddNew("e", "echo", f)
+		}).
+		fails(func() error {
+			return n.AddNew("notfound", "notfound", f)
+		}).
+		ok(func() error {
+			return n.Connect("de", "Out", "e", "In")
+		}).
+		ok(func() error {
+			return n.MapInPort("In", "de", "In")
+		}).
+		ok(func() error {
+			return n.MapOutPort("Out", "e", "Out")
+		})
+	if p.err != nil {
+		t.Error(p.err)
 		return
 	}
 
