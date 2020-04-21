@@ -87,13 +87,11 @@ func TestFactoryGraph(t *testing.T) {
 		}).
 		ok(func() error {
 			return n.Connect("de", "Out", "e", "In")
-		}).
-		ok(func() error {
-			return n.MapInPort("In", "de", "In")
-		}).
-		ok(func() error {
-			return n.MapOutPort("Out", "e", "Out")
 		})
+
+	n.MapInPort("In", "de", "In")
+	n.MapOutPort("Out", "e", "Out")
+
 	if p.err != nil {
 		t.Error(p.err)
 		return

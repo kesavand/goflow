@@ -11,12 +11,8 @@ func newRepeatGraph() (*Graph, error) {
 		return nil, err
 	}
 
-	if err := n.MapInPort("Word", "r", "Word"); err != nil {
-		return nil, err
-	}
-	if err := n.MapOutPort("Words", "r", "Words"); err != nil {
-		return nil, err
-	}
+	n.MapInPort("Word", "r", "Word")
+	n.MapOutPort("Words", "r", "Words")
 
 	return n, nil
 }
@@ -80,22 +76,13 @@ func newRepeatGraph2Ins() (*Graph, error) {
 	p := new(pipeline)
 	n := NewGraph()
 
-	p.
-		ok(func() error {
-			return n.Add("r", new(repeater))
-		}).
-		ok(func() error {
-			return n.MapInPort("Word", "r", "Word")
-		}).
-		ok(func() error {
-			return n.MapInPort("Times", "r", "Times")
-		}).
-		ok(func() error {
-			return n.MapOutPort("Words", "r", "Words")
-		})
-	if p.err != nil {
-		return nil, p.err
+	if err := n.Add("r", new(repeater)); err != nil {
+		return nil, err
 	}
+
+	n.MapInPort("Word", "r", "Word")
+	n.MapInPort("Times", "r", "Times")
+	n.MapOutPort("Words", "r", "Words")
 
 	return n, nil
 }

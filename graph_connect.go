@@ -1,35 +1,30 @@
 package goflow
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 )
 
-// port stores full port information within the network.
-type port struct {
-	// Process name in the network
-	proc string
-	// Port name of the process
-	port string
-	// Actual channel attached
-	channel reflect.Value
-	// Runtime info
-	info PortInfo
+// address is a full port accessor including the index part
+type address struct {
+	proc  string
+	port  string
+	key   string
+	index int
 }
 
-// portName stores full port name within the network.
-type portName struct {
-	// Process name in the network
-	proc string
-	// Port name of the process
-	port string
+func (a address) String() string {
+	if a.key != "" {
+		return fmt.Sprintf("%s.%s[%s]", a.proc, a.port, a.key)
+	}
+	return fmt.Sprintf("%s.%s", a.proc, a.port)
 }
 
 // connection stores information about a connection within the net.
 type connection struct {
-	src     portName
-	tgt     portName
+	src     address
+	tgt     address
 	channel reflect.Value
 	buffer  int
 }
@@ -45,61 +40,51 @@ func (n *Graph) Connect(senderName, senderPort, receiverName, receiverPort strin
 // ConnectBuf connects a sender to a receiver using a channel with a buffer of a given size.
 // It returns true on success or panics and returns false if error occurs.
 func (n *Graph) ConnectBuf(senderName, senderPort, receiverName, receiverPort string, bufferSize int) error {
-	senderPortVal, err := n.getProcPort(senderName, senderPort, reflect.SendDir)
+	sendAddr := parseAddress(senderName, senderPort)
+	sendPort, err := n.getProcPort(senderName, sendAddr.port, reflect.SendDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("connect: %w", err)
 	}
 
-	receiverPortVal, err := n.getProcPort(receiverName, receiverPort, reflect.RecvDir)
+	recvAddr := parseAddress(receiverName, receiverPort)
+	recvPort, err := n.getProcPort(receiverName, recvAddr.port, reflect.RecvDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("connect: %w", err)
 	}
 
-	// Try to get an existing channel
-	var channel reflect.Value
-	if !receiverPortVal.IsNil() {
-		// Find existing channel attached to the receiver
-		channel = n.findExistingChan(receiverName, receiverPort, reflect.RecvDir)
-	}
-
-	sndPortType := senderPortVal.Type()
-
-	if !senderPortVal.IsNil() {
-		// If both ports are already busy, we cannot connect them
-		if channel.IsValid() && senderPortVal.Addr() != receiverPortVal.Addr() {
-			return fmt.Errorf("'%s.%s' cannot be connected to '%s.%s': both ports already in use", receiverName, receiverPort, senderName, senderPort)
-		}
-		// Find an existing channel attached to sender
-		// Receiver channel takes priority if exists
-		if !channel.IsValid() {
-			channel = n.findExistingChan(senderName, senderPort, reflect.SendDir)
+	isNewChan := false // tells if a new channel will need to be created for this connection
+	// Try to find an existing outbound channel from the same sender,
+	// so it can be used as fan-out FIFO
+	ch := n.findExistingChan(sendAddr, reflect.SendDir)
+	if !ch.IsValid() || ch.IsNil() {
+		// Then try to find an existing inbound channel to the same receiver,
+		// so it can be used as a fan-in FIFO
+		ch = n.findExistingChan(recvAddr, reflect.RecvDir)
+		if ch.IsValid() && !ch.IsNil() {
+			// Increase the number of listeners on this already used channel
+			n.incChanListenersCount(ch)
+		} else {
+			isNewChan = true
 		}
 	}
-
-	// Create a new channel if none of the existing channles found
-	if !channel.IsValid() {
-		// Make a channel of an appropriate type
-		chanType := reflect.ChanOf(reflect.BothDir, sndPortType.Elem())
-		channel = reflect.MakeChan(chanType, bufferSize)
+	ch, err = attachPort(sendPort, sendAddr, reflect.SendDir, ch, bufferSize)
+	if err != nil {
+		return fmt.Errorf("connect '%s.%s': %w", senderName, senderPort, err)
 	}
 
-	// Set the channels
-	// TODO fix rewiring a graph without disconnecting ports
-	if senderPortVal.IsNil() {
-		senderPortVal.Set(channel)
-		n.incSendChanRefCount(channel)
+	if _, err = attachPort(recvPort, recvAddr, reflect.RecvDir, ch, bufferSize); err != nil {
+		return fmt.Errorf("connect '%s.%s': %w", receiverName, receiverPort, err)
 	}
-	if receiverPortVal.IsNil() {
-		receiverPortVal.Set(channel)
+	if isNewChan {
+		// Register the first listener on a newly created channel
+		n.incChanListenersCount(ch)
 	}
 
 	// Add connection info
 	n.connections = append(n.connections, connection{
-		src: portName{proc: senderName,
-			port: senderPort},
-		tgt: portName{proc: receiverName,
-			port: receiverPort},
-		channel: channel,
+		src:     sendAddr,
+		tgt:     recvAddr,
+		channel: ch,
 		buffer:  bufferSize})
 
 	return nil
@@ -108,19 +93,19 @@ func (n *Graph) ConnectBuf(senderName, senderPort, receiverName, receiverPort st
 // getProcPort finds an assignable port field in one of the subprocesses
 func (n *Graph) getProcPort(procName, portName string, dir reflect.ChanDir) (reflect.Value, error) {
 	nilValue := reflect.ValueOf(nil)
-	// Ensure process exists
+	// Check if process exists
 	proc, ok := n.procs[procName]
 	if !ok {
-		return nilValue, fmt.Errorf("Connect error: process '%s' not found", procName)
+		return nilValue, fmt.Errorf("getProcPort: process '%s' not found", procName)
 	}
 
-	// Ensure sender is settable
+	// Check if process is settable
 	val := reflect.ValueOf(proc)
 	if val.Kind() == reflect.Ptr && val.IsValid() {
 		val = val.Elem()
 	}
 	if !val.CanSet() {
-		return nilValue, fmt.Errorf("Connect error: process '%s' is not settable", procName)
+		return nilValue, fmt.Errorf("getProcPort: process '%s' is not settable", procName)
 	}
 
 	// Get the port value
@@ -130,56 +115,160 @@ func (n *Graph) getProcPort(procName, portName string, dir reflect.ChanDir) (ref
 	net, ok := val.Interface().(Graph)
 	if ok {
 		// Sender is a net
+		var ports map[string]port
 		if dir == reflect.SendDir {
-			portVal, err = net.getOutPort(portName)
+			ports = net.outPorts
 		} else {
-			portVal, err = net.getInPort(portName)
+			ports = net.inPorts
 		}
+		port, ok := ports[portName]
+		if !ok {
+			return nilValue, fmt.Errorf("getProcPort: subgraph '%s' does not have inport '%s'", procName, portName)
+		}
+		portVal, err = net.getProcPort(port.addr.proc, port.addr.port, dir)
 
 	} else {
 		// Sender is a proc
 		portVal = val.FieldByName(portName)
-		if !portVal.IsValid() {
-			err = errors.New("")
-		}
+	}
+	if err == nil && (!portVal.IsValid()) {
+		err = fmt.Errorf("process '%s' does not have a valid port '%s'", procName, portName)
 	}
 	if err != nil {
-		return nilValue, fmt.Errorf("Connect error: process '%s' does not have port '%s'", procName, portName)
-	}
-
-	// Validate port type
-	portType := portVal.Type()
-
-	// Sender port can be an array port
-	if dir == reflect.SendDir && portType.Kind() == reflect.Slice {
-		portType = portType.Elem()
-	}
-
-	// Validate
-	if portType.Kind() != reflect.Chan || portType.ChanDir()&dir == 0 {
-		return nilValue, fmt.Errorf("Connect error: '%s.%s' is not of the correct chan type", procName, portName)
-	}
-
-	// Check assignability
-	if !portVal.CanSet() {
-		return nilValue, fmt.Errorf("'%s.%s' is not assignable", procName, portName)
+		return nilValue, fmt.Errorf("getProcPort: %w", err)
 	}
 
 	return portVal, nil
 }
 
+func attachPort(port reflect.Value, addr address, dir reflect.ChanDir, ch reflect.Value, bufSize int) (reflect.Value, error) {
+	if addr.index > -1 {
+		return attachArrayPort(port, addr.index, dir, ch, bufSize)
+	}
+	if addr.key != "" {
+		return attachMapPort(port, addr.key, dir, ch, bufSize)
+	}
+	return attachChanPort(port, dir, ch, bufSize)
+}
+
+func attachChanPort(port reflect.Value, dir reflect.ChanDir, ch reflect.Value, bufSize int) (reflect.Value, error) {
+	if err := validateChanDir(port.Type(), dir); err != nil {
+		return ch, err
+	}
+	if err := validateCanSet(port); err != nil {
+		return ch, err
+	}
+	ch = selectOrMakeChan(ch, port, port.Type().Elem(), bufSize)
+	port.Set(ch)
+	return ch, nil
+}
+
+func attachMapPort(port reflect.Value, key string, dir reflect.ChanDir, ch reflect.Value, bufSize int) (reflect.Value, error) {
+	if err := validateChanDir(port.Type().Elem(), dir); err != nil {
+		return ch, err
+	}
+	kv := reflect.ValueOf(key)
+	item := port.MapIndex(kv)
+	ch = selectOrMakeChan(ch, item, port.Type().Elem().Elem(), bufSize)
+	if port.IsNil() {
+		m := reflect.MakeMap(port.Type())
+		port.Set(m)
+	}
+	port.SetMapIndex(kv, ch)
+	return ch, nil
+}
+
+func attachArrayPort(port reflect.Value, key int, dir reflect.ChanDir, ch reflect.Value, bufSize int) (reflect.Value, error) {
+	if err := validateChanDir(port.Type().Elem(), dir); err != nil {
+		return ch, err
+	}
+	if port.IsNil() {
+		m := reflect.MakeSlice(port.Type(), 0, 32)
+		port.Set(m)
+	}
+	if port.Cap() <= key {
+		port.SetCap(2 * key)
+	}
+	if port.Len() <= key {
+		port.SetLen(key + 1)
+	}
+	item := port.Index(key)
+	ch = selectOrMakeChan(ch, item, port.Type().Elem().Elem(), bufSize)
+	item.Set(ch)
+	return ch, nil
+}
+
+func validateChanDir(portType reflect.Type, dir reflect.ChanDir) error {
+	if portType.Kind() != reflect.Chan {
+		return fmt.Errorf("not a channel")
+	}
+
+	if portType.ChanDir()&dir == 0 {
+		return fmt.Errorf("channel does not support direction %s", dir.String())
+	}
+	return nil
+}
+
+func validateCanSet(portVal reflect.Value) error {
+	if !portVal.CanSet() {
+		return fmt.Errorf("port is not assignable")
+	}
+	return nil
+}
+
+func selectOrMakeChan(new, existing reflect.Value, t reflect.Type, bufSize int) reflect.Value {
+	if !new.IsValid() || new.IsNil() {
+		if existing.IsValid() && !existing.IsNil() {
+			return existing
+		}
+		chanType := reflect.ChanOf(reflect.BothDir, t)
+		new = reflect.MakeChan(chanType, bufSize)
+	}
+	return new
+}
+
+// parseAddress unfolds a string port name into parts, including array index or hashmap key
+func parseAddress(proc, port string) address {
+	n := address{
+		proc:  proc,
+		port:  port,
+		index: -1,
+	}
+	keyPos := 0
+	key := ""
+	for i, r := range port {
+		if r == '[' {
+			keyPos = i + 1
+			n.port = port[0:i]
+		}
+		if r == ']' {
+			key = port[keyPos:i]
+		}
+	}
+	if key == "" {
+		return n
+	}
+	if i, err := strconv.Atoi(key); err == nil {
+		n.index = i
+	} else {
+		n.key = key
+	}
+	n.key = key
+	return n
+}
+
 // findExistingChan returns a channel attached to receiver if it already exists among connections
-func (n *Graph) findExistingChan(proc, procPort string, dir reflect.ChanDir) reflect.Value {
+func (n *Graph) findExistingChan(addr address, dir reflect.ChanDir) reflect.Value {
 	var channel reflect.Value
 	// Find existing channel attached to the receiver
 	for _, conn := range n.connections {
-		var p portName
+		var a address
 		if dir == reflect.SendDir {
-			p = conn.src
+			a = conn.src
 		} else {
-			p = conn.tgt
+			a = conn.tgt
 		}
-		if p.port == procPort && p.proc == proc {
+		if a == addr {
 			channel = conn.channel
 			break
 		}
@@ -187,34 +276,34 @@ func (n *Graph) findExistingChan(proc, procPort string, dir reflect.ChanDir) ref
 	return channel
 }
 
-// IncSendChanRefCount increments SendChanRefCount.
+// incChanListenersCount increments SendChanRefCount.
 // The count is needed when multiple senders are connected
 // to the same receiver. When the network is terminated and
 // senders need to close their output port, this counter
 // can help to avoid closing the same channel multiple times.
-func (n *Graph) incSendChanRefCount(c reflect.Value) {
-	n.sendChanMutex.Lock()
-	defer n.sendChanMutex.Unlock()
+func (n *Graph) incChanListenersCount(c reflect.Value) {
+	n.chanListenersCountLock.Lock()
+	defer n.chanListenersCountLock.Unlock()
 
 	ptr := c.Pointer()
-	cnt := n.sendChanRefCount[ptr]
+	cnt := n.chanListenersCount[ptr]
 	cnt++
-	n.sendChanRefCount[ptr] = cnt
+	n.chanListenersCount[ptr] = cnt
 }
 
-// DecSendChanRefCount decrements SendChanRefCount
+// decChanListenersCount decrements SendChanRefCount
 // It returns true if the RefCount has reached 0
-func (n *Graph) decSendChanRefCount(c reflect.Value) bool {
-	n.sendChanMutex.Lock()
-	defer n.sendChanMutex.Unlock()
+func (n *Graph) decChanListenersCount(c reflect.Value) bool {
+	n.chanListenersCountLock.Lock()
+	defer n.chanListenersCountLock.Unlock()
 
 	ptr := c.Pointer()
-	cnt := n.sendChanRefCount[ptr]
+	cnt := n.chanListenersCount[ptr]
 	if cnt == 0 {
 		return true //yes you may try to close a nonexistant channel, see what happens...
 	}
 	cnt--
-	n.sendChanRefCount[ptr] = cnt
+	n.chanListenersCount[ptr] = cnt
 	return cnt == 0
 }
 
