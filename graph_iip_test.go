@@ -73,7 +73,6 @@ func TestBasicIIP(t *testing.T) {
 }
 
 func newRepeatGraph2Ins() (*Graph, error) {
-	p := new(pipeline)
 	n := NewGraph()
 
 	if err := n.Add("r", new(repeater)); err != nil {
