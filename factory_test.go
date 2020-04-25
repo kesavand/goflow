@@ -40,11 +40,6 @@ func TestFactoryRegistration(t *testing.T) {
 		ok(func() error {
 			return RegisterTestComponents(f)
 		}).
-		ok(func() error {
-			return f.Register("echo", func() (interface{}, error) {
-				return new(echo), nil
-			})
-		}).
 		fails(func() error {
 			return f.Annotate("notfound", Annotation{})
 		}).
@@ -54,6 +49,10 @@ func TestFactoryRegistration(t *testing.T) {
 		fails(func() error {
 			return f.Unregister("echo")
 		})
+
+	if p.err != nil {
+		t.Error(p.err)
+	}
 }
 
 func TestFactoryGraph(t *testing.T) {
